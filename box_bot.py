@@ -1,0 +1,461 @@
+from memory_store import *
+from constants import *
+from ids import *
+from logger import add_log
+from bilibili_api import user
+import re, os, json
+from datetime import datetime
+import time
+import asyncio
+from send_reply import send_split_reply
+
+# 盲盒名称正则（供 extract_type / extract_month_and_type 复用，避免重复构建）
+BOX_NAMES_PATTERN = '|'.join(re.escape(name) for name in BOX_NAME_LIST)
+
+def net_punctuation(net, big_loss=-10000, small_loss=-2000, big_profit=10000, small_profit=2000):
+    """根据盲盒净收益返回语气标点后缀；阈值可按查询类型（个人/全场/月度）调整。"""
+    if net < big_loss:
+        return "!？"
+    elif net < small_loss:
+        return "？"
+    elif net > big_profit:
+        return "?！"
+    elif net > small_profit:
+        return "!！"
+    return "！"
+
+# 呼叫盲盒姬
+async def call_box(uid, uname, msg):
+    global last_query_time
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+            return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发盲盒姬")
+        await asyncio.sleep(3)
+
+    box_name = extract_type(msg)
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    data_type = "box" if box_name is None else "gift"
+
+    cnt, cost, profit = await load_daily_data(uid, data_type, box_name=box_name, check_user_type="single")
+    net = profit - cost
+
+    if cnt > 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝今天已抽取{cnt}个{reply_box_name}，净收益{net:.0f}电池"
+        else:
+            reply = f"[盲盒姬]{uname}老师今天已抽取{cnt}个{reply_box_name}，净收益{net:.0f}电池"
+
+        reply += net_punctuation(net, -10000, -2000, 10000, 2000)
+    
+    elif cnt == 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝今天还没有开过{reply_box_name}哦"
+        else:
+            reply = f"[盲盒姬]{uname}老师今天还没有开过{reply_box_name}哦"
+    
+    await send_split_reply(uid, reply, "[盲盒姬]")
+
+    add_log(f"[盲盒姬] 回复 {uname}")
+    last_query_time[uid_str] = now
+
+# 呼叫盲盒姬总部
+async def call_all_box(uid, uname, msg):
+    global last_query_time
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+        return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发全局盲盒姬")
+        await asyncio.sleep(3)
+    
+    box_name = extract_type(msg)
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    data_type = "box" if box_name is None else "gift"
+
+    cnt, cost, profit = await load_daily_data(uid, data_type, box_name=box_name, check_user_type="all")
+    net = profit - cost
+
+    if cnt > 0:
+        reply = f"[盲盒姬]今天全场已抽取{cnt}个{reply_box_name}，净收益{net:.0f}电池"
+
+        reply += net_punctuation(net, -20000, -4000, 20000, 4000)
+    
+    elif cnt == 0:
+        reply = f"[盲盒姬]今天还没有人开过{reply_box_name}哦"
+    
+    await send_split_reply(uid, reply, "[盲盒姬]")
+
+    add_log(f"[盲盒姬] 全局回复 {uname}")
+    last_query_time[uid_str] = now
+
+# 指定uid盲盒姬
+async def call_at_box(uid, uname, msg):
+    global last_query_time
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+        return
+
+    if uid not in [ADMIN_ID, YQZ_ID, XIAOZAO_ID]:
+        return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发盲盒姬")
+        await asyncio.sleep(3)
+
+    at_match = re.search(r'@(\d+)$', msg)
+    to_check_uid_str = at_match.group(1) if at_match else "0"
+    clean_msg = re.sub(r'@\d+$', '', msg)
+
+    user_data = MEMORY["box"].get(to_check_uid_str)
+    if user_data:
+        to_check_uid = user_data.get("uid", 0)
+        to_check_uname = user_data.get("uname", "您指定的")
+    else:
+        to_check_uid = int(to_check_uid_str.strip())
+        try:
+            u = user.User(to_check_uid, credential=credential)
+            to_check_info = await u.get_user_info()
+            to_check_uname = to_check_info.get("name", "您指定的")
+        except Exception as e:
+            to_check_uname = "Default"
+            print(f"ERROR when loading to_check_uname: {e}")
+
+    box_name = extract_type(clean_msg)
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    data_type = "box" if box_name is None else "gift"
+
+    cnt, cost, profit = await load_daily_data(to_check_uid, data_type, box_name=box_name, check_user_type="single")
+    net = profit - cost
+
+    if cnt > 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝今天已抽取{cnt}个{reply_box_name}，净收益{net:.0f}电池"
+        else:
+            reply = f"[盲盒姬]{to_check_uname}老师今天已抽取{cnt}个{reply_box_name}，净收益{net:.0f}电池"
+
+        reply += net_punctuation(net, -10000, -2000, 10000, 2000)
+    
+    elif cnt == 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝今天还没有开过{reply_box_name}哦"
+        else:
+            reply = f"[盲盒姬]{to_check_uname}老师今天还没有开过{reply_box_name}哦"
+    
+    await send_split_reply(uid, reply, "[盲盒姬]")
+
+    add_log(f"[盲盒姬] 回复 {uname}（指定查询用户: {to_check_uname}）")
+    last_query_time[uid_str] = now
+
+# 月度盲盒姬
+async def call_month_box(uid, uname, msg):
+    global last_query_time
+    add_log(f"[盲盒姬] {uname}触发月份盲盒姬")
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+        return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发盲盒姬")
+        await asyncio.sleep(3)
+
+    month, box_name = extract_month_and_type(msg)
+    
+    if month is None:
+        return
+
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    year = datetime.now().year
+    data_type = "box" if box_name is None else "gift"
+
+    month_cnt, month_cost, month_profit = await load_month_data(uid, month, year, data_type, box_name=box_name, check_user_type="single")
+    month_net = month_profit - month_cost
+    if month_cnt > 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝{month}月已抽取{month_cnt}个{reply_box_name}，净收益{month_net:.0f}电池"
+        else:
+            reply = f"[盲盒姬]{uname}老师{month}月已抽取{month_cnt}个{reply_box_name}，净收益{month_net:.0f}电池"
+    
+        reply += net_punctuation(month_net, -50000, -10000, 50000, 10000)
+
+    elif month_cnt == 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝{month}月还没有抽取过{reply_box_name}哦"
+        else:
+            reply = f"[盲盒姬]{uname}老师{month}月还没有抽取过{reply_box_name}哦"
+    
+    await send_split_reply(uid, reply, "[盲盒姬]")
+    
+    add_log(f"[盲盒姬] 发送月份统计")
+    last_query_time[uid_str] = now
+
+# 月度全局盲盒姬
+async def call_month_all_box(uid, uname, msg):
+    global last_query_time
+    add_log(f"[盲盒姬] {uname}触发全局月份盲盒姬")
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+        return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发全局盲盒姬")
+        await asyncio.sleep(3)
+
+    month, box_name = extract_month_and_type(msg)
+    if month is None:
+        return
+
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    year = datetime.now().year
+    data_type = "box" if box_name is None else "gift"
+
+    month_cnt, month_cost, month_profit = await load_month_data(uid, month, year, data_type, box_name=box_name, check_user_type="all")
+    month_net = month_profit - month_cost
+    if month_cnt > 0:
+        reply = f"[盲盒姬]{month}月全场已抽取{month_cnt}个{reply_box_name}，净收益{month_net:.0f}电池"
+
+        reply += net_punctuation(month_net, -50000, -10000, 50000, 10000)
+        
+        await send_split_reply(uid, reply, "[盲盒姬]")
+
+    elif month_cnt == 0:
+        reply = f"[盲盒姬]{month}月还没有人抽取过{reply_box_name}哦"
+        await reply_queue.put((uid, reply))
+    
+    add_log(f"[盲盒姬] 发送月份全局统计")
+    last_query_time[uid_str] = now
+
+# 指定uid月度盲盒姬
+async def call_month_at_box(uid, uname, msg):
+    global last_query_time
+    now = time.time()
+    uid_str = str(uid)
+    if uid_str in last_query_time and now - last_query_time[uid_str] < 10:
+        return
+
+    if uid not in [ADMIN_ID, YQZ_ID, XIAOZAO_ID]:
+        return
+
+    if uid == ADMIN_ID:
+        add_log("[盲盒姬] 卡米宝宝触发盲盒姬")
+        await asyncio.sleep(3)
+
+    at_match = re.search(r'@(\d+)$', msg)
+    to_check_uid_str = at_match.group(1) if at_match else "0"
+    clean_msg = re.sub(r'@\d+$', '', msg)
+
+    user_data = MEMORY["box"].get(to_check_uid_str)
+    if user_data:
+        to_check_uid = user_data.get("uid", 0)
+        to_check_uname = user_data.get("uname", "您指定的")
+    else:
+        to_check_uid = int(to_check_uid_str.strip())
+        try:
+            u = user.User(to_check_uid, credential=credential)
+            to_check_info = await u.get_user_info()
+            to_check_uname = to_check_info.get("name", "您指定的")
+        except Exception as e:
+            to_check_uname = "Default"
+            print(f"ERROR when loading to_check_uname: {e}")
+
+    month, box_name = extract_month_and_type(clean_msg)
+
+    if month is None:
+        return
+
+    reply_box_name = BOX_MEMORY_MAP.get(box_name, "盲盒")
+
+    year = datetime.now().year
+    data_type = "box" if box_name is None else "gift"
+
+    month_cnt, month_cost, month_profit = await load_month_data(to_check_uid, month, year, data_type, box_name=box_name, check_user_type="single")
+    month_net = month_profit - month_cost
+    if month_cnt > 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝{month}月已抽取{month_cnt}个{reply_box_name}，净收益{month_net:.0f}电池"
+        else:
+            reply = f"[盲盒姬]{to_check_uname}老师{month}月已抽取{month_cnt}个{reply_box_name}，净收益{month_net:.0f}电池"
+
+        reply += net_punctuation(month_net, -50000, -10000, 50000, 10000)
+
+    elif month_cnt == 0:
+        if uid == ADMIN_ID:
+            reply = f"[盲盒姬]卡米宝宝{month}月还没有抽取过{reply_box_name}哦"
+        else:
+            reply = f"[盲盒姬]{to_check_uname}老师{month}月还没有抽取过{reply_box_name}哦"
+    
+    await send_split_reply(uid, reply, "[盲盒姬]")
+    
+    add_log(f"[盲盒姬] 回复 {uname}（指定查询用户：{to_check_uname}）")
+    last_query_time[uid_str] = now
+
+
+#################################
+# 辅助函数
+def box_calculate(uid_str, daily_data, check_user_type):
+    # check_user_type: "single" or "all"
+    daily_cnt, daily_cost, daily_profit = 0, 0, 0
+    if check_user_type == "single":
+        for key, value in daily_data.items():
+            if key == uid_str:
+                daily_cnt += value.get("count", 0)
+                daily_cost += value.get("cost", 0)
+                daily_profit += value.get("profit", 0)
+                break
+    else:
+        for key, value in daily_data.items():
+            daily_cnt += value.get("count", 0)
+            daily_cost += value.get("cost", 0)
+            daily_profit += value.get("profit", 0)
+
+    return daily_cnt, daily_cost, daily_profit
+
+def boxn_calculate(uid_str, daily_data, box_name, check_user_type):
+    # box_list = globals().get(f"BOX_LIST_{n}", {})
+    daily_cnt, daily_cost, daily_profit = 0, 0, 0
+    # single_cost = [50, 500, 150, 250, 250, 90, 90, 500, 90, 90]
+
+    if check_user_type == "single":
+        user_data = daily_data.get(uid_str)
+        if user_data:
+            daily_cnt = user_data.get("info", {}).get(box_name, 0)
+            daily_cost = user_data.get("cost_detail", {}).get(box_name, 0)
+            daily_profit = user_data.get("profit_detail", {}).get(box_name, 0)
+    else:
+        for key, value in daily_data.items():
+            daily_cnt += value.get("info", {}).get(box_name, 0)
+            daily_cost += value.get("cost_detail", {}).get(box_name, 0)
+            daily_profit += value.get("profit_detail", {}).get(box_name, 0)
+
+    return daily_cnt, daily_cost, daily_profit
+
+async def load_month_data(uid, month, year, data_type, box_name=None, check_user_type="single"):
+    # data_type(str): "box", "gift"
+    month_cnt = 0
+    month_cost = 0
+    month_profit = 0
+    uid_str = str(uid)
+
+    now = datetime.now()
+    if month > now.month:
+        year -= 1
+    year = year % 100
+    month_str = f"{month:02d}"
+
+    pattern = re.compile(rf'box{year}{month_str}(\d{{2}})\.json')
+    all_data = {}
+    files_dir = f"history_files/box/"
+
+    if not os.path.exists(files_dir):
+        return (0, 0, 0)
+
+    for filename in os.listdir(files_dir):
+        match = pattern.match(filename)
+        if not match:
+            continue
+
+        day = int(match.group(1))
+        try:
+            with open(files_dir + filename, "r", encoding="utf-8") as f:
+                daily_data = json.load(f)
+        except Exception as e:
+            print(f"Error when loading {filename}: {e}")
+            continue
+
+        if data_type == "box":
+            daily_cnt, daily_cost, daily_profit = box_calculate(uid_str, daily_data, check_user_type=check_user_type)
+            
+        elif data_type == "gift" and box_name is not None:
+            full_box_name = BOX_MEMORY_MAP.get(box_name, box_name)
+            daily_cnt, daily_cost, daily_profit = boxn_calculate(uid_str, daily_data, box_name=full_box_name, check_user_type=check_user_type)
+            
+        month_cnt += daily_cnt
+        month_cost += daily_cost
+    # 当天的盲盒数据
+    # if data_type == "box":
+    try:
+        if data_type == "box":
+            daily_cnt, daily_cost, daily_profit = box_calculate(uid_str, daily_data, check_user_type=check_user_type)
+    # except Exception as e:
+    #     print(f"No box.json: {e}, command passed")
+
+                # with open("files/gift.json", "r", encoding="utf-8") as f:
+                #     daily_data = json.load(f)
+            full_box_name = BOX_MEMORY_MAP.get(box_name, box_name)
+            daily_cnt, daily_cost, daily_profit = boxn_calculate(uid_str, daily_data, box_name=full_box_name, check_user_type=check_user_type)
+            month_cnt += daily_cnt
+            month_cost += daily_cost
+            month_profit += daily_profit
+            # except Exception as e:
+            #     print(f"No gift.json: {e}, command passed")
+
+    except Exception as e:
+        print(f"No box.json: {e}, command passed")
+
+    return month_cnt, month_cost, month_profit
+
+async def load_daily_data(uid, data_type, box_name=None, check_user_type="single"):
+    daily_cnt = 0
+    daily_cost = 0
+    daily_profit = 0
+    uid_str = str(uid)
+
+    try:
+        with open("files/box.json", "r", encoding="utf-8") as f:
+            daily_data = json.load(f)
+        if data_type == "box":
+            daily_cnt, daily_cost, daily_profit = box_calculate(uid_str, daily_data, check_user_type=check_user_type)
+            return daily_cnt, daily_cost, daily_profit
+
+        elif data_type == "gift" and box_name in BOX_MEMORY_MAP:
+            # with open("files/gift.json", "r", encoding="utf-8") as f:
+            #     daily_data = json.load(f)
+            full_box_name = BOX_MEMORY_MAP.get(box_name, box_name)
+            daily_cnt, daily_cost, daily_profit = boxn_calculate(uid_str, daily_data, box_name=full_box_name, check_user_type=check_user_type)
+            return daily_cnt, daily_cost, daily_profit
+        
+        return daily_cnt, daily_cost, daily_profit
+
+    except Exception as e:
+        print(f"No box.json: {e}, command passed")
+
+def extract_month_and_type(msg):
+    box_names_pattern = BOX_NAMES_PATTERN
+    match = re.search(rf'呼叫(\d{{1,2}})月({box_names_pattern})?盲盒姬', msg)
+    # match = re.search(r'呼叫(\d{1,2})月(心动|幸运S|幸运|真爱|梦幻之夏|噜噜|棕意|大航海|欧气|猪猪侠)?盲盒姬', msg)
+    if match:
+        month = int(match.group(1))
+        box_name = match.group(2) or None
+        if 1 <= month <= 12:
+            return month, box_name
+    
+    # match = re.search(r'呼叫(一|二|三|四|五|六|七|八|九|十|十一|十二)月(心动|幸运S|幸运|真爱|梦幻之夏|噜噜|棕意|大航海|欧气|猪猪侠)?盲盒姬', msg)
+    match = re.search(rf'呼叫(一|二|三|四|五|六|七|八|九|十|十一|十二)月({box_names_pattern})?盲盒姬', msg)
+    if match:
+        box_name = match.group(2) or None
+        return CN_MONTHS[match.group(1)], box_name
+    
+    return None, None
+
+def extract_type(msg):
+    box_names_pattern = BOX_NAMES_PATTERN
+    pattern = rf'呼叫({box_names_pattern})?盲盒姬'
+    # match = re.search(r'呼叫(心动|幸运S|幸运|真爱|梦幻之夏|噜噜|棕意|大航海|欧气|猪猪侠)?盲盒姬', msg)
+    match = re.search(pattern, msg)
+    if match:
+        box_name = match.group(1) or None
+        return box_name
+    return None
